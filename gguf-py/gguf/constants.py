@@ -558,6 +558,7 @@ class MODEL_ARCH(IntEnum):
     TALKIE           = auto()
     MELLUM           = auto()
     NANBEIGE         = auto()
+    VOLUNDR          = auto()
 
 
 class VISION_PROJECTOR_TYPE(IntEnum):
@@ -984,6 +985,12 @@ class MODEL_TENSOR(IntEnum):
     # eagle3
     FC                     = auto()  # feature fusion layer
     D2T                    = auto()  # draft to target vocabulary mapping
+    ENGRAM_NORM            = auto()  # volundr
+    ENGRAM_GATE            = auto()  # volundr
+    ENGRAM_VALUE           = auto()  # volundr
+    HC_DYN                 = auto()  # volundr mHC
+    HC_NORM                = auto()  # volundr mHC
+    HC_BASE                = auto()  # volundr mHC
     # lfm2 audio
     A_ENC_NORM_CONV        = auto()
     A_ENC_LINEAR_POS       = auto()
@@ -1156,6 +1163,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.TALKIE:           "talkie",
     MODEL_ARCH.MELLUM:           "mellum",
     MODEL_ARCH.NANBEIGE:         "nanbeige",
+    MODEL_ARCH.VOLUNDR:          "volundr",
 }
 
 VISION_PROJECTOR_TYPE_NAMES: dict[VISION_PROJECTOR_TYPE, str] = {
@@ -1608,6 +1616,12 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM:    "blk.{bid}.nextn.shared_head_norm",
     MODEL_TENSOR.FC:                        "fc",
     MODEL_TENSOR.D2T:                       "d2t",
+    MODEL_TENSOR.ENGRAM_NORM:               "blk.{bid}.engram_norm",
+    MODEL_TENSOR.ENGRAM_GATE:               "blk.{bid}.engram_gate",
+    MODEL_TENSOR.ENGRAM_VALUE:              "blk.{bid}.engram_value",
+    MODEL_TENSOR.HC_DYN:                    "blk.{bid}.hc_dyn",
+    MODEL_TENSOR.HC_NORM:                   "blk.{bid}.hc_norm",
+    MODEL_TENSOR.HC_BASE:                   "blk.{bid}.hc_base",
 }
 
 MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
@@ -2351,6 +2365,41 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.NEXTN_HNORM,
         MODEL_TENSOR.NEXTN_SHARED_HEAD_HEAD,
         MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
+    ],
+    MODEL_ARCH.VOLUNDR: [
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_POST_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_GATE,
+        MODEL_TENSOR.ATTN_QKV,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.SSM_A,
+        MODEL_TENSOR.SSM_CONV1D,
+        MODEL_TENSOR.SSM_DT,
+        MODEL_TENSOR.SSM_NORM,
+        MODEL_TENSOR.SSM_BETA,
+        MODEL_TENSOR.SSM_OUT,
+        MODEL_TENSOR.SSM_F_A,
+        MODEL_TENSOR.SSM_F_B,
+        MODEL_TENSOR.INDEXER_Q_PROJ,
+        MODEL_TENSOR.INDEXER_K_PROJ,
+        MODEL_TENSOR.INDEXER_K_NORM,
+        MODEL_TENSOR.ENGRAM_NORM,
+        MODEL_TENSOR.ENGRAM_GATE,
+        MODEL_TENSOR.ENGRAM_VALUE,
+        MODEL_TENSOR.HC_DYN,
+        MODEL_TENSOR.HC_NORM,
+        MODEL_TENSOR.HC_BASE,
     ],
     MODEL_ARCH.QWEN35MOE: [
         MODEL_TENSOR.TOKEN_EMBD,

@@ -574,6 +574,8 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_NGRAM_HASH,
+        GGML_OP_SINKHORN,
 
         GGML_OP_UNARY,
 
@@ -2639,6 +2641,29 @@ extern "C" {
             struct ggml_tensor  * residual,
             struct ggml_tensor  * post,
             struct ggml_tensor  * comb);
+
+    // n-gram hash (Agens Volundr Engram): a F32 [prefix + n, n_seqs] holds (token id + 1) values, the first `prefix`
+    //   entries of each column being the previous tokens of that sequence (0 = before the sequence start)
+    //   result I32 [n, n_seqs]: row of the `order`-gram ending at each token,
+    //   code = fold_j ((code*primes[j % n_primes] + e_j) mod 2^61), row = code % rows  (uint64 arithmetic)
+    GGML_API struct ggml_tensor * ggml_ngram_hash(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   order,
+            int                   prefix,
+            int                   rows,
+            const int32_t       * primes,
+            int                   n_primes);
+
+    // Sinkhorn projection (Agens Volundr mHC): a F32 [n*n, n_tokens] (rows may be strided), a[j + n*i] = logit of M[i][j]
+    //   M = exp(a - max(a)), then n_iter x (normalise rows, normalise columns), sums clamped to >= eps
+    //   result F32 [n, n, n_tokens], result[i, j, t] = M[i][j]  (the comb layout of ggml_dsv4_hc_post)
+    GGML_API struct ggml_tensor * ggml_sinkhorn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   n,
+            int                   n_iter,
+            float                 eps);
 
     // custom operators
 

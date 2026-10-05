@@ -234,6 +234,10 @@ struct llama_hparams {
     uint32_t indexer_n_head    = 0;
     uint32_t indexer_head_size = 0;
     uint32_t indexer_top_k     = 0;
+
+    // extra f32 slots appended to each recurrent "r" (conv) state row; Volundr stores the last
+    //   (max_engram_order - 1) token ids of every sequence there for its Engram n-gram hash
+    uint32_t n_embd_r_extra    = 0;
     // MSA
     uint32_t indexer_block_size  = 0;
     uint32_t indexer_local_blocks = 0;

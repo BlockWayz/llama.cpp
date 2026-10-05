@@ -2792,7 +2792,8 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                     || t.first == "<|im_end|>"
                     || t.first == "<|end|>"
                     || t.first == "<|return|>" // o200k_harmony
-                    || t.first == "<|call|>"   // o200k_harmony
+                    || (t.first == "<|call|>" && token_to_id.count("<|/call|>") == 0) // o200k_harmony (Agens/Volundr: <|call|>..<|/call|> wraps a tool call, not EOG)
+                    || t.first == "<|agens_end|>" // Agens/Volundr end of turn
                     || t.first == "<|flush|>"  // solar-open
                     || t.first == "<|calls|>"  // solar-open
                     || t.first == "<end_of_turn>"

@@ -11229,6 +11229,93 @@ void ggml_compute_forward_dsv4_hc_post(
     }
 }
 
+// ggml_compute_forward_ngram_hash
+
+void ggml_compute_forward_ngram_hash(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_I32);
+
+    const int32_t order    = ggml_get_op_params_i32(dst, 0);
+    const int32_t prefix   = ggml_get_op_params_i32(dst, 1);
+    const int32_t rows     = ggml_get_op_params_i32(dst, 2);
+    const int32_t n_primes = ggml_get_op_params_i32(dst, 3);
+
+    uint64_t primes[8];
+    for (int i = 0; i < n_primes; ++i) {
+        primes[i] = (uint64_t) (uint32_t) ggml_get_op_params_i32(dst, 4 + i);
+    }
+
+    const int64_t n  = dst->ne[0];
+    const int64_t ns = dst->ne[1];
+    const uint64_t mask61 = 0x1FFFFFFFFFFFFFFFull;
+
+    for (int64_t ir = params->ith; ir < n*ns; ir += params->nth) {
+        const int64_t t = ir % n;
+        const int64_t s = ir / n;
+        const char * e = (const char *) src0->data + s*src0->nb[1];
+
+        uint64_t code = 0;
+        for (int32_t j = 0; j < order; ++j) {
+            const int64_t  idx = (int64_t) prefix + t - (order - 1) + j;
+            const uint64_t ev  = (uint64_t) (int64_t) *(const float *) (e + idx*src0->nb[0]);
+            code = (code*primes[j % n_primes] + ev) & mask61;
+        }
+        *(int32_t *) ((char *) dst->data + t*dst->nb[0] + s*dst->nb[1]) = (int32_t) (code % (uint64_t) rows);
+    }
+}
+
+// ggml_compute_forward_sinkhorn
+
+void ggml_compute_forward_sinkhorn(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+
+    const int32_t n      = ggml_get_op_params_i32(dst, 0);
+    const int32_t n_iter = ggml_get_op_params_i32(dst, 1);
+    const float   eps    = ggml_get_op_params_f32(dst, 2);
+
+    const int64_t nt = dst->ne[2];
+    float M[64];
+
+    for (int64_t t = params->ith; t < nt; t += params->nth) {
+        const char * lp = (const char *) src0->data + t*src0->nb[1];
+
+        float mx = -INFINITY;
+        for (int k = 0; k < n*n; ++k) {
+            M[k] = *(const float *) (lp + k*src0->nb[0]);
+            mx = MAX(mx, M[k]);
+        }
+        for (int k = 0; k < n*n; ++k) {
+            M[k] = expf(M[k] - mx);
+        }
+        for (int it = 0; it < n_iter; ++it) {
+            for (int i = 0; i < n; ++i) {
+                float sum = 0.0f;
+                for (int j = 0; j < n; ++j) sum += M[i*n + j];
+                sum = MAX(sum, eps);
+                for (int j = 0; j < n; ++j) M[i*n + j] /= sum;
+            }
+            for (int j = 0; j < n; ++j) {
+                float sum = 0.0f;
+                for (int i = 0; i < n; ++i) sum += M[i*n + j];
+                sum = MAX(sum, eps);
+                for (int i = 0; i < n; ++i) M[i*n + j] /= sum;
+            }
+        }
+
+        char * dp = (char *) dst->data + t*dst->nb[2];
+        for (int i = 0; i < n; ++i) {
+            for (int j = 0; j < n; ++j) {
+                *(float *) (dp + i*dst->nb[0] + j*dst->nb[1]) = M[i*n + j];
+            }
+        }
+    }
+}
+
 // ggml_compute_forward_rwkv_wkv7
 
 static void ggml_compute_forward_rwkv_wkv7_f32(

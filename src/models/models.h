@@ -2055,6 +2055,71 @@ struct llama_model_qwen35 : public llama_model_base {
 };
 
 
+class llm_graph_input_bcsa;
+
+// Agens Volundr (Blockway): Qwen3.5-style hybrid with
+//   - KDA linear-attention mixers (per-channel low-rank forget gate, GVA 16 key / 48 value heads)
+//   - BCSA (block-compressed sparse attention): exact sliding-window attention + mean-pooled far-field blocks picked by a
+//     learned indexer (top-k), one shared softmax
+//   - Engram hashed n-gram memory gated into the residual
+//   - mHC: n residual streams mixed by Sinkhorn-projected matrices
+struct llama_model_volundr : public llama_model_base {
+    llama_model_volundr(const struct llama_model_params & params) : llama_model_base(params) {}
+    void load_arch_hparams(llama_model_loader & ml) override;
+    void load_arch_tensors(llama_model_loader & ml) override;
+
+    struct engram_hash_params {
+        uint32_t order;      // n of the n-gram
+        uint32_t prefix;     // number of previous token slots prepended to the ids (max_order - 1)
+        uint32_t rows;       // table rows
+        uint64_t primes[8];
+        uint32_t n_primes;
+    };
+
+    struct sinkhorn_params {
+        int   n;      // streams
+        int   iters;
+        float eps;    // clamp_min for the row/column sums
+    };
+
+    struct volundr_params {
+        std::array<uint32_t, LLAMA_MAX_LAYERS> is_bcsa;
+        std::array<uint32_t, LLAMA_MAX_LAYERS> is_engram;
+        uint32_t bcsa_window   = 4096;
+        uint32_t bcsa_compress = 4;
+        uint32_t engram_rows   = 0;
+        uint32_t engram_dim    = 0;
+        uint32_t n_engram_orders = 0;
+        std::array<uint32_t, LLAMA_MAX_LAYERS> engram_orders;
+        uint32_t n_engram_primes = 0;
+        std::array<uint32_t, LLAMA_MAX_LAYERS> engram_primes;
+        uint32_t kda_gate_rank = 0;
+        uint32_t mhc_streams   = 1;
+        uint32_t mhc_iters     = 10;
+        float    mhc_eps       = 1e-9f;
+
+        engram_hash_params hash[4];
+        sinkhorn_params    sk;
+    } vp;
+
+    struct graph : public llm_build_delta_net_base {
+        graph(const llama_model & model, const llm_graph_params & params);
+    private:
+        ggml_tensor * build_kda(llm_graph_input_rs * inp, ggml_tensor * cur, ggml_tensor ** engram_ctx, int il);
+        ggml_tensor * e_ids = nullptr; // F32 [n_tokens], token id + 1 (Engram)
+        ggml_tensor * build_attn_dense(llm_graph_input_attn_kv * inp, ggml_tensor * cur, ggml_tensor * inp_pos, int il);
+        ggml_tensor * build_attn_bcsa(llm_graph_input_attn_kv * inp, llm_graph_input_bcsa * inp_bcsa,
+                                      ggml_tensor * cur, ggml_tensor * inp_pos, int il);
+        ggml_tensor * build_engram(ggml_tensor * y, ggml_tensor * e_ids, ggml_tensor * engram_ctx, int il);
+        ggml_tensor * pool_kv_scores(ggml_tensor * s, ggml_tensor * blk_cell, int64_t n_blk);
+        ggml_tensor * scatter_blk_probs(ggml_tensor * p, ggml_tensor * cell_blk, int64_t n_kv);
+
+        const llama_model_volundr & model;
+    };
+
+    std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
+};
+
 struct llama_model_qwen35moe : public llama_model_base {
     llama_model_qwen35moe(const struct llama_model_params & params) : llama_model_base(params) {}
     void load_arch_hparams(llama_model_loader & ml) override;

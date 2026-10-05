@@ -3880,6 +3880,64 @@ struct test_dsv4_hc_pre : public test_dsv4_hc {
     }
 };
 
+// GGML_OP_NGRAM_HASH (Agens Volundr Engram)
+struct test_ngram_hash : public test_case {
+    const int order;
+    const int64_t n;
+    const int64_t n_seqs;
+
+    std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "NGRAM_HASH"; }
+    std::string vars() override { return VARS_TO_STR3(order, n, n_seqs); }
+
+    test_ngram_hash(int order = 3, int64_t n = 17, int64_t n_seqs = 2) : order(order), n(n), n_seqs(n_seqs) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2 + n, n_seqs);
+        ggml_set_name(a, "ids");
+        const int32_t primes[5] = { 1000003, 1000033, 1000037, 1000039, 1000081 };
+        ggml_tensor * out = ggml_ngram_hash(ctx, a, order, 2, 1 << 20, primes, 5);
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::mt19937 rng(1234);
+        std::uniform_int_distribution<int> dist(0, 248320);
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            std::vector<float> v(ggml_nelements(t));
+            for (auto & x : v) x = (float) dist(rng);
+            ggml_backend_tensor_set(t, v.data(), 0, ggml_nbytes(t));
+        }
+    }
+};
+
+// GGML_OP_SINKHORN (Agens Volundr mHC)
+struct test_sinkhorn : public test_case {
+    const int n;
+    const int64_t n_tokens;
+    const bool strided;
+
+    std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "SINKHORN"; }
+    std::string vars() override { return VARS_TO_STR3(n, n_tokens, strided); }
+
+    test_sinkhorn(int n = 4, int64_t n_tokens = 33, bool strided = false) : n(n), n_tokens(n_tokens), strided(strided) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, strided ? 2*n + n*n : n*n, n_tokens);
+        ggml_set_name(a, "logits");
+        ggml_tensor * l = strided ? ggml_view_2d(ctx, a, n*n, n_tokens, a->nb[1], 2*n*ggml_element_size(a)) : a;
+        ggml_tensor * out = ggml_sinkhorn(ctx, l, n, 10, 1e-9f);
+        ggml_set_name(out, "out");
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            init_tensor_uniform(t, -3.0f, 16.0f);
+        }
+    }
+};
+
 struct test_dsv4_hc_post : public test_dsv4_hc {
     const int64_t n_embd;
     const int64_t n_tokens;
@@ -8055,6 +8113,18 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsv4_hc_comb(17, 4));
     test_cases.emplace_back(new test_dsv4_hc_comb(257, 8));
 
+    for (int order : {1, 2, 3}) {
+        for (int64_t n : {1, 17, 512}) {
+            test_cases.emplace_back(new test_ngram_hash(order, n, 1));
+            test_cases.emplace_back(new test_ngram_hash(order, n, 3));
+        }
+    }
+    for (bool strided : {false, true}) {
+        test_cases.emplace_back(new test_sinkhorn(4, 1, strided));
+        test_cases.emplace_back(new test_sinkhorn(4, 33, strided));
+        test_cases.emplace_back(new test_sinkhorn(4, 4096, strided));
+        test_cases.emplace_back(new test_sinkhorn(3, 7, strided));
+    }
     test_cases.emplace_back(new test_dsv4_hc_pre(1, 1));
     test_cases.emplace_back(new test_dsv4_hc_pre(31, 17));
     test_cases.emplace_back(new test_dsv4_hc_pre(128, 257));

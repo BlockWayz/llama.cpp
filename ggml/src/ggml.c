@@ -1083,6 +1083,8 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_COMB",
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
+    "NGRAM_HASH",
+    "SINKHORN",
 
     "UNARY",
 
@@ -1100,7 +1102,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1198,6 +1200,8 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_comb(mixes, scale, base)",
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
+    "ngram_hash(x)",
+    "sinkhorn(x)",
 
     "unary(x)",
 
@@ -1215,7 +1219,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6466,6 +6470,59 @@ struct ggml_tensor * ggml_dsv4_hc_post(
     result->src[1] = residual;
     result->src[2] = post;
     result->src[3] = comb;
+
+    return result;
+}
+
+// ggml_ngram_hash
+
+struct ggml_tensor * ggml_ngram_hash(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   order,
+        int                   prefix,
+        int                   rows,
+        const int32_t       * primes,
+        int                   n_primes) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(order >= 1 && prefix >= order - 1 && rows > 0);
+    GGML_ASSERT(n_primes >= 1 && n_primes <= 8);
+    GGML_ASSERT(a->ne[0] > prefix && a->ne[2] == 1 && a->ne[3] == 1);
+
+    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, a->ne[0] - prefix, a->ne[1]);
+
+    int32_t params[12] = { order, prefix, rows, n_primes, 0, 0, 0, 0, 0, 0, 0, 0 };
+    for (int i = 0; i < n_primes; ++i) {
+        params[4 + i] = primes[i];
+    }
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_NGRAM_HASH;
+    result->src[0] = a;
+
+    return result;
+}
+
+// ggml_sinkhorn
+
+struct ggml_tensor * ggml_sinkhorn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   n,
+        int                   n_iter,
+        float                 eps) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32);
+    GGML_ASSERT(n >= 1 && n <= 8 && n_iter >= 0);
+    GGML_ASSERT(a->ne[0] == n*n && a->ne[2] == 1 && a->ne[3] == 1);
+
+    struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n, n, a->ne[1]);
+
+    int32_t params[3] = { n, n_iter, 0 };
+    memcpy(&params[2], &eps, sizeof(float));
+    ggml_set_op_params(result, params, sizeof(params));
+
+    result->op     = GGML_OP_SINKHORN;
+    result->src[0] = a;
 
     return result;
 }

@@ -145,6 +145,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_TALKIE,           "talkie"           },
     { LLM_ARCH_MELLUM,           "mellum"           },
     { LLM_ARCH_NANBEIGE,         "nanbeige"         },
+    { LLM_ARCH_VOLUNDR,          "volundr"          },
     { LLM_ARCH_UNKNOWN,          "(unknown)"        },
 };
 
@@ -277,6 +278,16 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_HYPER_CONNECTION_EPSILON,               "%s.hyper_connection.epsilon"               },
 
     { LLM_KV_HASH_LAYER_COUNT,                       "%s.hash_layer_count"                       },
+
+    { LLM_KV_KDA_GATE_RANK,                          "%s.kda.gate_rank"                          },
+    { LLM_KV_BCSA_LAYERS,                            "%s.bcsa.layers"                            },
+    { LLM_KV_BCSA_WINDOW,                            "%s.bcsa.window"                            },
+    { LLM_KV_BCSA_COMPRESS,                          "%s.bcsa.compress"                          },
+    { LLM_KV_ENGRAM_LAYERS,                          "%s.engram.layers"                          },
+    { LLM_KV_ENGRAM_ORDERS,                          "%s.engram.orders"                          },
+    { LLM_KV_ENGRAM_PRIMES,                          "%s.engram.primes"                          },
+    { LLM_KV_ENGRAM_ROWS,                            "%s.engram.rows"                            },
+    { LLM_KV_ENGRAM_DIM,                             "%s.engram.dim"                             },
 
     { LLM_KV_ROPE_DIMENSION_COUNT,           "%s.rope.dimension_count"                 },
     { LLM_KV_ROPE_DIMENSION_COUNT_SWA,       "%s.rope.dimension_count_swa"             },
@@ -628,6 +639,13 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_MASKED_EMBD_ORDERING,                   "masked_embd_ordering" },
     { LLM_TENSOR_FC,                                     "fc" },
     { LLM_TENSOR_D2T,                                    "d2t" },
+    { LLM_TENSOR_ENGRAM_EMBD,                            "blk.%d.engram_embd.%d" },
+    { LLM_TENSOR_ENGRAM_NORM,                            "blk.%d.engram_norm" },
+    { LLM_TENSOR_ENGRAM_GATE,                            "blk.%d.engram_gate" },
+    { LLM_TENSOR_ENGRAM_VALUE,                           "blk.%d.engram_value" },
+    { LLM_TENSOR_HC_DYN,                                 "blk.%d.hc_dyn" },
+    { LLM_TENSOR_HC_NORM,                                "blk.%d.hc_norm" },
+    { LLM_TENSOR_HC_BASE,                                "blk.%d.hc_base" },
 };
 
 // declare information about the model weight tensors:
@@ -889,6 +907,15 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     // eagle3
     {LLM_TENSOR_FC,                         {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_MUL_MAT}},
     {LLM_TENSOR_D2T,                        {LLM_TENSOR_LAYER_OUTPUT,    GGML_OP_GET_ROWS}},
+    // volundr: the 4 Engram tables (2 x 1M x 512 per Engram layer) are lookup-only; to keep them in host RAM when
+    //   offloading, use --override-tensor "engram_embd=CPU"
+    {LLM_TENSOR_ENGRAM_EMBD,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_GET_ROWS}},
+    {LLM_TENSOR_ENGRAM_NORM,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_ENGRAM_GATE,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_ENGRAM_VALUE,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_HC_DYN,                     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_HC_NORM,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_HC_BASE,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
 };
 
 LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}
@@ -981,6 +1008,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_KIMI_K3:
         case LLM_ARCH_QWEN35:
         case LLM_ARCH_QWEN35MOE:
+        case LLM_ARCH_VOLUNDR:
             return true;
         default:
             return false;

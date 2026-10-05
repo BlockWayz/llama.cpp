@@ -214,6 +214,13 @@ public:
     void set_input_k_shift(ggml_tensor * dst) const;
 
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // Volundr BCSA (block-compressed sparse attention) inputs, built from the cell metadata; see llama-kv-cache.cpp
+    // sparse decode extras (nullable): win_cell I32 [n_win, n_seqs] / win_mask F32 [n_win, n_seqs] for the window positions,
+    //   blk_flat I32 [n_cmp*n_blk, n_seqs]; cell indices are flat over the streams of the view (stream*kv_size + cell)
+    void set_input_bcsa(ggml_tensor * loc_mask, ggml_tensor * far_mask, ggml_tensor * blk_cell, ggml_tensor * cell_blk,
+                        ggml_tensor * win_cell, ggml_tensor * win_mask, ggml_tensor * blk_flat,
+                        const llama_ubatch * ubatch, const slot_info & sinfo, uint32_t n_win, uint32_t n_cmp) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;
@@ -404,6 +411,10 @@ public:
 
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    void set_input_bcsa(ggml_tensor * loc_mask, ggml_tensor * far_mask, ggml_tensor * blk_cell, ggml_tensor * cell_blk,
+                        ggml_tensor * win_cell, ggml_tensor * win_mask, ggml_tensor * blk_flat,
+                        const llama_ubatch * ubatch, uint32_t n_win, uint32_t n_cmp) const;
     void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;

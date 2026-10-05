@@ -524,6 +524,16 @@ struct llama_layer {
     struct ggml_tensor * indexer_attn_k   = nullptr;
     struct ggml_tensor * indexer_attn_q_b = nullptr; // note: for lora a/b, not bias
 
+    // Volundr (Engram n-gram memory + mHC hyper-connections; the BCSA indexer reuses index_q_proj/index_k_proj/index_k_norm)
+    struct ggml_tensor * engram_embd[4] = { nullptr, nullptr, nullptr, nullptr }; // one table per n-gram order
+    struct ggml_tensor * engram_norm    = nullptr;
+    struct ggml_tensor * engram_gate    = nullptr;
+    struct ggml_tensor * engram_gate_b  = nullptr;
+    struct ggml_tensor * engram_value   = nullptr;
+    struct ggml_tensor * hc_dyn         = nullptr;
+    struct ggml_tensor * hc_norm        = nullptr;
+    struct ggml_tensor * hc_base        = nullptr;
+
     // MSA
     struct ggml_tensor * index_q_proj = nullptr;
     struct ggml_tensor * index_k_proj = nullptr;

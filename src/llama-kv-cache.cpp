@@ -1906,6 +1906,148 @@ void llama_kv_cache::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * u
     //LLAMA_LOG_ERROR("%s: kq mask time: %0.3f ms\n", __func__, (t_end - t_start)/1000.0);
 }
 
+// Volundr BCSA inputs. The attention of a BCSA layer is evaluated per ubatch sequence ("group" g = 0..n_seqs-1, holding
+// n_seq_tokens tokens) over the n_kv cells of the group's stream view:
+//   loc_mask [n_kv,  n_seq_tokens, 1, n_seqs] f32 : 0 if cell j holds a token of the group's sequence with p_q - n_win < p_kv <= p_q
+//   far_mask [n_blk, n_seq_tokens, 1, n_seqs] f32 : 0 if block b (positions [b*n_cmp, (b+1)*n_cmp)) of the sequence is complete in
+//                                                  the cache and lies entirely before the query's window: (b+1)*n_cmp - 1 <= p_q - n_win
+//   blk_cell [n_cmp*n_blk, n_seqs]            i32 : view-local cell holding position b*n_cmp + c of the sequence (0 if absent -> masked)
+//   cell_blk [n_kv, n_seqs]                   i32 : block b of the cell if that block is complete, else n_blk (a zero row)
+// Blocks are anchored to absolute positions (as in the reference implementation), not to cell slots, so this works for
+// unified caches with several sequences and for any cell placement.
+void llama_kv_cache::set_input_bcsa(ggml_tensor * loc_mask, ggml_tensor * far_mask, ggml_tensor * blk_cell, ggml_tensor * cell_blk,
+        ggml_tensor * win_cell, ggml_tensor * win_mask, ggml_tensor * blk_flat,
+        const llama_ubatch * ubatch, const slot_info & sinfo, uint32_t n_win, uint32_t n_cmp) const {
+    GGML_ASSERT(loc_mask->type == GGML_TYPE_F32);
+
+    // inputs that the graph does not use are left unallocated (e.g. loc_mask/cell_blk on the sparse decode path)
+    auto has = [](const ggml_tensor * t) { return t && t->buffer && ggml_backend_buffer_is_host(t->buffer); };
+
+    const int64_t n_kv   = loc_mask->ne[0];
+    const int64_t n_stok = loc_mask->ne[1];
+    const int64_t n_grp  = loc_mask->ne[3];
+    const int64_t n_blk  = far_mask ? far_mask->ne[0] : 0;
+
+    GGML_ASSERT((int64_t) ubatch->n_tokens == n_stok*n_grp);
+
+    const uint32_t ns_view = sinfo.s1 - sinfo.s0 + 1;
+    GGML_ASSERT(ns_view == 1 || (int64_t) ns_view == n_grp);
+
+    float * dloc = has(loc_mask) ? (float *) loc_mask->data : nullptr;
+
+    std::vector<int32_t> pos2cell;
+    std::vector<uint8_t> blk_ok;
+
+    for (int64_t g = 0; g < n_grp; ++g) {
+        const llama_seq_id seq_id = ubatch->seq_id[g*n_stok][0];
+        const uint32_t     strm   = seq_to_stream[seq_id];
+
+        if (ns_view > 1) {
+            GGML_ASSERT(strm - sinfo.s0 == (uint32_t) g && "BCSA: ubatch sequence order must match the stream view order");
+        }
+
+        const auto & cells = v_cells.at(strm);
+        const int64_t s_off = (int64_t) (strm - sinfo.s0)*get_size();   // flat row offset of this stream in the view
+
+        if (has(win_cell)) {
+            // sparse decode: one query per group; window slot w <-> position p - n_win + 1 + w
+            GGML_ASSERT(n_stok == 1);
+            const llama_pos p1 = ubatch->pos[g*n_stok];
+            std::unordered_map<llama_pos, int32_t> wmap;
+            wmap.reserve(2*n_win);
+            for (int64_t j = 0; j < n_kv; ++j) {
+                if (cells.is_empty(j) || !cells.seq_has(j, seq_id)) {
+                    continue;
+                }
+                const llama_pos p = cells.pos_get(j);
+                if (p <= p1 && p1 - p < (llama_pos) n_win) {
+                    wmap[p] = (int32_t) j;
+                }
+            }
+            int32_t * dwc = (int32_t *) win_cell->data + g*n_win;
+            float   * dwm = (float   *) win_mask->data + g*n_win;
+            for (int64_t w = 0; w < (int64_t) n_win; ++w) {
+                const llama_pos p = p1 - (llama_pos) n_win + 1 + (llama_pos) w;
+                auto it = wmap.find(p);
+                dwc[w] = (int32_t) (s_off + (it != wmap.end() ? it->second : 0));
+                dwm[w] = it != wmap.end() ? 0.0f : -INFINITY;
+            }
+        }
+
+        // map positions of this sequence to cells (only positions inside the n_blk*n_cmp pooled range matter)
+        if (n_blk > 0) {
+            pos2cell.assign(n_blk*n_cmp, -1);
+            blk_ok.assign(n_blk + 1, 0);
+            for (int64_t j = 0; j < n_kv; ++j) {
+                if (cells.is_empty(j) || !cells.seq_has(j, seq_id)) {
+                    continue;
+                }
+                const llama_pos p = cells.pos_get(j);
+                if (p >= 0 && p < n_blk*n_cmp) {
+                    pos2cell[p] = (int32_t) j;
+                }
+            }
+            for (int64_t b = 0; b < n_blk; ++b) {
+                bool ok = true;
+                for (uint32_t c = 0; c < n_cmp; ++c) {
+                    ok = ok && pos2cell[b*n_cmp + c] >= 0;
+                }
+                blk_ok[b] = ok;
+            }
+
+            if (has(blk_cell)) {
+                int32_t * dbc = (int32_t *) blk_cell->data + g*n_blk*n_cmp;
+                for (int64_t i = 0; i < n_blk*n_cmp; ++i) {
+                    dbc[i] = blk_ok[i/n_cmp] ? pos2cell[i] : 0;
+                }
+            }
+            if (has(blk_flat)) {
+                int32_t * dbf = (int32_t *) blk_flat->data + g*n_blk*n_cmp;
+                for (int64_t i = 0; i < n_blk*n_cmp; ++i) {
+                    dbf[i] = (int32_t) (s_off + (blk_ok[i/n_cmp] ? pos2cell[i] : 0));
+                }
+            }
+
+            int32_t * dcb = has(cell_blk) ? (int32_t *) cell_blk->data + g*n_kv : nullptr;
+            for (int64_t j = 0; dcb && j < n_kv; ++j) {
+                dcb[j] = (int32_t) n_blk;
+                if (cells.is_empty(j) || !cells.seq_has(j, seq_id)) {
+                    continue;
+                }
+                const llama_pos p = cells.pos_get(j);
+                if (p >= 0 && p < n_blk*n_cmp && blk_ok[p/n_cmp]) {
+                    dcb[j] = (int32_t) (p/n_cmp);
+                }
+            }
+        }
+
+        for (int64_t t = 0; t < n_stok; ++t) {
+            const int64_t   i  = g*n_stok + t;
+            const llama_pos p1 = ubatch->pos[i];
+
+            float * row = dloc ? dloc + i*n_kv : nullptr;
+            for (int64_t j = 0; row && j < n_kv; ++j) {
+                float v = -INFINITY;
+                if (!cells.is_empty(j) && cells.seq_has(j, seq_id)) {
+                    const llama_pos p0 = cells.pos_get(j);
+                    if (p0 <= p1 && p1 - p0 < (llama_pos) n_win) {
+                        v = 0.0f;
+                    }
+                }
+                row[j] = v;
+            }
+
+            if (n_blk > 0 && has(far_mask)) {
+                float * frow = (float *) far_mask->data + i*n_blk;
+                for (int64_t b = 0; b < n_blk; ++b) {
+                    const bool ok = blk_ok[b] && (int64_t) (b + 1)*n_cmp - 1 + n_win <= (int64_t) p1;
+                    frow[b] = ok ? 0.0f : -INFINITY;
+                }
+            }
+        }
+    }
+}
+
 void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     const int64_t n_tokens = ubatch->n_tokens;
 
@@ -2890,6 +3032,12 @@ void llama_kv_cache_context::set_input_v_idxs(ggml_tensor * dst, const llama_uba
 
 void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const {
     kv->set_input_kq_mask(dst, ubatch, causal_attn);
+}
+
+void llama_kv_cache_context::set_input_bcsa(ggml_tensor * loc_mask, ggml_tensor * far_mask, ggml_tensor * blk_cell, ggml_tensor * cell_blk,
+        ggml_tensor * win_cell, ggml_tensor * win_mask, ggml_tensor * blk_flat,
+        const llama_ubatch * ubatch, uint32_t n_win, uint32_t n_cmp) const {
+    kv->set_input_bcsa(loc_mask, far_mask, blk_cell, cell_blk, win_cell, win_mask, blk_flat, ubatch, sinfos[i_cur], n_win, n_cmp);
 }
 
 void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
