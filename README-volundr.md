@@ -95,8 +95,8 @@ The mask costs nothing measurable: decode stays at ~32 tok/s with a 1.1K-token p
 
 * Text only: the vision tower is not converted.
 * No speculative decoding.
-* The two Volundr-specific ops have CPU and CUDA kernels only; on Metal, Vulkan or ROCm the scheduler runs those two
-  ops on the CPU.
+* The two Volundr-specific ops have CPU and CUDA kernels only; on Metal, Vulkan or ROCm the scheduler should run those
+  two ops on the CPU, but those backends have not been tested.
 * BCSA prompt processing scores every query against every cached position before pooling and selection, so long
   prompts get slower roughly quadratically (32K tokens: ~620 tok/s on one 48 GB GPU).
 * Recurrent state (KDA, Engram): no context shift and no partial KV removal, as for llama.cpp's other hybrid models.
