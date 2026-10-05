@@ -11,7 +11,9 @@
 #include <cctype>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -184,6 +186,49 @@ std::string common_params_sampling::print() const {
     return std::string(result);
 }
 
+// Volundr: the output layer has more rows than the tokenizer has tokens. The trailing ids (248077..248319, type
+// UNUSED in the GGUF; some are retired control-token ids) are never valid output, but the model can put real
+// probability on them - about 38 % on one of them where a tool call opens - which breaks sampled tool calls. The
+// reference serving stack masks them (generation_config.json `suppress_tokens`); do the same here for every sampler
+// built for a `volundr` model. Set VOLUNDR_MASK_UNUSED_TOKENS=0 to turn the mask off.
+static std::vector<llama_logit_bias> common_volundr_unused_token_mask(const llama_model * model, const llama_vocab * vocab) {
+    std::vector<llama_logit_bias> mask;
+
+    char arch[64] = {};
+    if (llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch)) < 0 || strcmp(arch, "volundr") != 0) {
+        return mask;
+    }
+
+    const char * env = getenv("VOLUNDR_MASK_UNUSED_TOKENS");
+    const bool enabled = !(env && strcmp(env, "0") == 0);
+
+    // the masked range is the trailing block of UNUSED tokens
+    const int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    int32_t first = n_vocab;
+    while (first > 0 && (llama_vocab_get_attr(vocab, first - 1) & LLAMA_TOKEN_ATTR_UNUSED)) {
+        first--;
+    }
+
+    static std::once_flag logged;
+    std::call_once(logged, [&]() {
+        if (enabled) {
+            LOG_INF("%s: volundr: masking %d unused token ids [%d, %d) (VOLUNDR_MASK_UNUSED_TOKENS=0 to disable)\n",
+                    __func__, n_vocab - first, first, n_vocab);
+        } else {
+            LOG_WRN("%s: volundr: unused-token mask disabled by VOLUNDR_MASK_UNUSED_TOKENS=0\n", __func__);
+        }
+    });
+
+    if (enabled) {
+        mask.reserve(n_vocab - first);
+        for (llama_token id = first; id < n_vocab; id++) {
+            mask.push_back({id, -INFINITY});
+        }
+    }
+
+    return mask;
+}
+
 struct common_sampler * common_sampler_init(const struct llama_model * model, struct common_params_sampling & params) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
@@ -307,6 +352,13 @@ struct common_sampler * common_sampler_init(const struct llama_model * model, st
         for (const auto & token : prefill_tokens) {
             llama_sampler_accept(rbudget, token);
             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+        }
+    }
+
+    {
+        const auto mask = common_volundr_unused_token_mask(model, vocab);
+        if (!mask.empty()) {
+            samplers.push_back(llama_sampler_init_logit_bias(llama_vocab_n_tokens(vocab), mask.size(), mask.data()));
         }
     }
 
