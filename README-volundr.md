@@ -20,7 +20,7 @@ one dense gated-attention layer, Engram hashed n-gram memory on two layers, and 
 | HF → GGUF conversion (text model) | `conversion/volundr.py`, `gguf-py/gguf/constants.py` |
 | chat template: `<|call|>` is not end-of-generation when the vocab also has `<|/call|>`; `<|agens_end|>` ends a turn | `src/llama-vocab.cpp` |
 | unused-token mask (see below) | `common/sampling.cpp` |
-| parity / debugging tools `llama-volundr-dump`, `llama-volundr-chat-test` | `examples/volundr-dump/` |
+| parity / debugging tools `llama-volundr-dump`, `llama-volundr-chat-test`, `llama-volundr-state-test`, `slot_cache_test.py` | `examples/volundr-dump/` |
 
 The branch starts from llama.cpp commit `cf67f0d24` (July 2026). Everything else is upstream llama.cpp, unchanged.
 
@@ -83,6 +83,53 @@ The mask costs nothing measurable: decode stays at ~32 tok/s with a 1.1K-token p
 
 `VOLUNDR_MASK_UNUSED_TOKENS=0` turns the mask off (e.g. to inspect raw distributions).
 
+## Multi-turn prompt cache
+
+`llama-server` reuses the cached state when a request extends an earlier one (the next turn of a chat), so only the new
+tokens are processed. This works with the default settings; nothing Volundr-specific has to be enabled.
+
+* The BCSA/dense KV cache (including the BCSA indexer keys) is truncated in place to the common prefix.
+* The recurrent state (KDA state, conv state and the two previous token ids that Engram hashes at the boundary) cannot
+  be rolled back, so the server keeps *context checkpoints* of it, taken during prompt processing at user-message
+  starts and 4 and 4 + n_ubatch tokens before the end of each prompt. When the new prompt diverges from the cached one
+  (e.g. the chat template drops the previous turn's reasoning), the server restores the nearest checkpoint before the
+  divergence and processes from there. If no checkpoint fits, it falls back to a full prompt reprocess.
+* Each checkpoint holds 168 MiB of recurrent state in host RAM.
+
+Turn-2 time to first token, Q4_K_M on one 48 GB GPU, `-np 1`, chat completions, greedy:
+
+| history | cold (full prefill) | warm (cache reuse) | tokens processed when warm |
+|---:|---:|---:|---:|
+| 8K, no thinking | 6.1 s | 0.4-0.6 s | 37 |
+| 30K, no thinking | 46.5 s | 0.5 s | 37 |
+| 8K, thinking (reasoning dropped from history: checkpoint restore) | 5.9 s | 0.6-0.7 s | 215-238 |
+| 30K, thinking (checkpoint restore) | 46.8 s | 1.4 s | 358 |
+
+The restored state is exact: restoring a checkpoint, or a full saved sequence state, and processing the same tokens
+again gives bit-identical logits (`llama-volundr-state-test`, below). A warm turn is not bit-identical to a cold
+prefill of the same prompt because the prompt is split into different batches. That is the same rounding noise as
+changing `-ub`: in our runs, greedy output of warm and cold matched for 300/300 tokens when no checkpoint was needed.
+With a checkpoint restore, they matched until the first near-tie (69-214 tokens; two cold runs at `-ub 512` and
+`-ub 256` matched for 123). The max logprob difference of the sampled token was 0.04-0.12, against 0.06 between the two
+cold runs.
+
+Relevant flags (defaults are fine for a single user):
+
+| flag | default | note |
+|---|---|---|
+| `--ctx-checkpoints N` | 32 | checkpoints kept per slot; at 168 MiB each, up to 5.3 GiB of host RAM per slot. A multi-turn chat only needs the last few; `--ctx-checkpoints 8` caps it at 1.3 GiB per slot |
+| `--checkpoint-min-step N` | 8192 | minimum spacing of the mid-prompt checkpoints; the ones near the end of a prompt and at the last user message are always taken |
+| `--cache-ram N` | 8192 | host prompt cache (MiB) that keeps idle conversations, with their checkpoints, when a slot switches to another conversation. A 30K-token conversation takes ~2.5 GiB plus its checkpoints, so raise this for many concurrent conversations |
+| `-np N` | auto | one slot per concurrent conversation avoids swapping through the host prompt cache |
+
+`--cache-reuse` (KV shifting) is not supported for this model, and `/slots` save/restore files do not include
+checkpoints. A restored slot is therefore reused only when the next prompt extends the saved tokens exactly.
+
+To check a build: `examples/volundr-dump/slot_cache_test.py <port> <history tokens> [--think] [--interleave]` runs
+turn 1, then turn 2 warm and cold against a running `llama-server` and compares the outputs.
+`llama-volundr-state-test -m model.gguf -f some.txt -ngl 99` checks state save/restore directly, including a negative
+control that zeroes the Engram previous ids.
+
 ## Environment variables
 
 | variable | default | effect |
@@ -99,7 +146,8 @@ The mask costs nothing measurable: decode stays at ~32 tok/s with a 1.1K-token p
   two ops on the CPU, but those backends have not been tested.
 * BCSA prompt processing scores every query against every cached position before pooling and selection, so long
   prompts get slower roughly quadratically (32K tokens: ~620 tok/s on one 48 GB GPU).
-* Recurrent state (KDA, Engram): no context shift and no partial KV removal, as for llama.cpp's other hybrid models.
+* Recurrent state (KDA, Engram): no context shift and no arbitrary partial KV removal, as for llama.cpp's other
+  hybrid models. Multi-turn prompt reuse works through context checkpoints (see "Multi-turn prompt cache" above).
 * `--split-mode layer` works across GPUs but gives no speed-up over one 48 GB GPU; `--split-mode row` does not load.
 
 ## Converting a checkpoint yourself
