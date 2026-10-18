@@ -100,6 +100,73 @@ static __global__ void dsv4_hc_comb_f32(
     }
 }
 
+static __global__ void dsv4_hc_comb_sinkhorn_f32(
+        const float * mixes,
+        float * dst,
+        int64_t n_tokens,
+        int64_t sm0,
+        int64_t sm1,
+        int64_t sd0,
+        int64_t sd1,
+        int64_t sd2,
+        float eps,
+        int32_t n_iter) {
+    constexpr int comb_offset = 2*DSV4_HC;
+
+    ggml_cuda_pdl_lc();
+    const int64_t it = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (it >= n_tokens) {
+        return;
+    }
+
+    ggml_cuda_pdl_sync();
+
+    float comb[DSV4_HC*DSV4_HC];
+
+    float max = -INFINITY;
+    for (int idst = 0; idst < DSV4_HC; ++idst) {
+        for (int isrc = 0; isrc < DSV4_HC; ++isrc) {
+            const float v = mixes[(comb_offset + isrc + DSV4_HC*idst)*sm0 + it*sm1];
+            comb[idst + DSV4_HC*isrc] = v;
+            max = fmaxf(max, v);
+        }
+    }
+
+    for (int i = 0; i < DSV4_HC*DSV4_HC; ++i) {
+        comb[i] = expf(comb[i] - max);
+    }
+
+    for (int32_t i = 0; i < n_iter; ++i) {
+        for (int idst = 0; idst < DSV4_HC; ++idst) {
+            float sum = 0.0f;
+            for (int isrc = 0; isrc < DSV4_HC; ++isrc) {
+                sum += comb[idst + DSV4_HC*isrc];
+            }
+            sum = fmaxf(sum, eps);
+            for (int isrc = 0; isrc < DSV4_HC; ++isrc) {
+                comb[idst + DSV4_HC*isrc] /= sum;
+            }
+        }
+        for (int isrc = 0; isrc < DSV4_HC; ++isrc) {
+            float sum = 0.0f;
+            for (int idst = 0; idst < DSV4_HC; ++idst) {
+                sum += comb[idst + DSV4_HC*isrc];
+            }
+            sum = fmaxf(sum, eps);
+            for (int idst = 0; idst < DSV4_HC; ++idst) {
+                comb[idst + DSV4_HC*isrc] /= sum;
+            }
+        }
+    }
+
+    for (int isrc = 0; isrc < DSV4_HC; ++isrc) {
+        for (int idst = 0; idst < DSV4_HC; ++idst) {
+            dst[idst*sd0 + isrc*sd1 + it*sd2] = comb[idst + DSV4_HC*isrc];
+        }
+    }
+}
+
 template <bool gated>
 static __global__ void dsv4_hc_pre_f32(
         const float * x,
@@ -202,7 +269,42 @@ static __global__ void dsv4_hc_post_f32(
     dst[i0*sd0 + idst*sd1 + it*sd2] = sum;
 }
 
+static void ggml_cuda_op_dsv4_hc_comb_sinkhorn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const ggml_tensor * mixes = dst->src[0];
+
+    GGML_ASSERT(mixes->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(mixes->ne[0] == (2 + DSV4_HC)*DSV4_HC);
+    GGML_ASSERT(dst->ne[0] == DSV4_HC);
+    GGML_ASSERT(dst->ne[1] == DSV4_HC);
+    GGML_ASSERT(dst->ne[2] == mixes->ne[1]);
+
+    GGML_TENSOR_LOCALS(size_t, nbm, mixes, nb);
+    GGML_TENSOR_LOCALS(size_t, nbd, dst,   nb);
+
+    const int64_t n_tokens = mixes->ne[1];
+    const float eps = ggml_get_op_params_f32(dst, 0);
+    const int32_t n_iter = ggml_get_op_params_i32(dst, 1);
+
+    const int block_size = 256;
+    const dim3 block_dims(block_size, 1, 1);
+    const dim3 grid_dims((n_tokens + block_size - 1) / block_size, 1, 1);
+    const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(grid_dims, block_dims, 0, ctx.stream());
+
+    ggml_cuda_kernel_launch(dsv4_hc_comb_sinkhorn_f32, launch_params,
+            (const float *) mixes->data, (float *) dst->data,
+            n_tokens,
+            nbm0 / sizeof(float), nbm1 / sizeof(float),
+            nbd0 / sizeof(float), nbd1 / sizeof(float), nbd2 / sizeof(float),
+            eps, n_iter);
+}
+
 void ggml_cuda_op_dsv4_hc_comb(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    if (ggml_get_op_params_i32(dst, 2) != 0) {
+        ggml_cuda_op_dsv4_hc_comb_sinkhorn(ctx, dst);
+        return;
+    }
+
     const ggml_tensor * mixes = dst->src[0];
     const ggml_tensor * scale = dst->src[1];
     const ggml_tensor * base  = dst->src[2];
