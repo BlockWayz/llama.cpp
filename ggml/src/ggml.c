@@ -6478,16 +6478,15 @@ struct ggml_tensor * ggml_lightning_indexer(
 
 // ggml_dsv4_hc_comb
 
-struct ggml_tensor * ggml_dsv4_hc_comb(
+static struct ggml_tensor * ggml_dsv4_hc_comb_impl(
         struct ggml_context * ctx,
         struct ggml_tensor  * mixes,
         struct ggml_tensor  * scale,
         struct ggml_tensor  * base,
         float                 eps,
-        int32_t               n_iter) {
+        int32_t               n_iter,
+        bool                  sinkhorn) {
     GGML_ASSERT(mixes->type == GGML_TYPE_F32);
-    GGML_ASSERT(scale->type == GGML_TYPE_F32);
-    GGML_ASSERT(base->type == GGML_TYPE_F32);
     GGML_ASSERT(n_iter > 0);
 
     const int64_t hc_mix_dim = mixes->ne[0];
@@ -6505,19 +6504,24 @@ struct ggml_tensor * ggml_dsv4_hc_comb(
     GGML_ASSERT(hc == 4);
     GGML_ASSERT(mixes->ne[2] == 1);
     GGML_ASSERT(mixes->ne[3] == 1);
-    GGML_ASSERT(scale->ne[0] >= 3);
-    GGML_ASSERT(scale->ne[1] == 1);
-    GGML_ASSERT(scale->ne[2] == 1);
-    GGML_ASSERT(scale->ne[3] == 1);
-    GGML_ASSERT(base->ne[0] == hc_mix_dim);
-    GGML_ASSERT(base->ne[1] == 1);
-    GGML_ASSERT(base->ne[2] == 1);
-    GGML_ASSERT(base->ne[3] == 1);
+    if (!sinkhorn) {
+        GGML_ASSERT(scale->type == GGML_TYPE_F32);
+        GGML_ASSERT(base->type == GGML_TYPE_F32);
+        GGML_ASSERT(scale->ne[0] >= 3);
+        GGML_ASSERT(scale->ne[1] == 1);
+        GGML_ASSERT(scale->ne[2] == 1);
+        GGML_ASSERT(scale->ne[3] == 1);
+        GGML_ASSERT(base->ne[0] == hc_mix_dim);
+        GGML_ASSERT(base->ne[1] == 1);
+        GGML_ASSERT(base->ne[2] == 1);
+        GGML_ASSERT(base->ne[3] == 1);
+    }
 
     struct ggml_tensor * result = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, hc, hc, n_tokens);
 
     ggml_set_op_params_f32(result, 0, eps);
     ggml_set_op_params_i32(result, 1, n_iter);
+    ggml_set_op_params_i32(result, 2, sinkhorn ? 1 : 0);
 
     result->op     = GGML_OP_DSV4_HC_COMB;
     result->src[0] = mixes;
@@ -6525,6 +6529,24 @@ struct ggml_tensor * ggml_dsv4_hc_comb(
     result->src[2] = base;
 
     return result;
+}
+
+struct ggml_tensor * ggml_dsv4_hc_comb(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * mixes,
+        struct ggml_tensor  * scale,
+        struct ggml_tensor  * base,
+        float                 eps,
+        int32_t               n_iter) {
+    return ggml_dsv4_hc_comb_impl(ctx, mixes, scale, base, eps, n_iter, false);
+}
+
+struct ggml_tensor * ggml_dsv4_hc_comb_sinkhorn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * mixes,
+        float                 eps,
+        int32_t               n_iter) {
+    return ggml_dsv4_hc_comb_impl(ctx, mixes, NULL, NULL, eps, n_iter, true);
 }
 
 // ggml_dsv4_hc_pre

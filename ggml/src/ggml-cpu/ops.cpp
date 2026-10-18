@@ -11545,6 +11545,84 @@ static void ggml_compute_forward_dsv4_hc_comb_f32(
     }
 }
 
+static void ggml_compute_forward_dsv4_hc_comb_sinkhorn_f32(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * mixes = dst->src[0];
+
+    GGML_ASSERT(mixes->type == GGML_TYPE_F32);
+    GGML_ASSERT(dst->type == GGML_TYPE_F32);
+
+    constexpr int64_t hc = 4;
+    constexpr int64_t comb_offset = 2*hc;
+
+    const int64_t n_tokens = mixes->ne[1];
+
+    GGML_ASSERT(mixes->ne[0] == (2 + hc)*hc);
+    GGML_ASSERT(dst->ne[0] == hc);
+    GGML_ASSERT(dst->ne[1] == hc);
+    GGML_ASSERT(dst->ne[2] == n_tokens);
+
+    GGML_TENSOR_LOCALS(size_t, nbm, mixes, nb);
+    GGML_TENSOR_LOCALS(size_t, nbd, dst,   nb);
+
+    const float eps = ggml_get_op_params_f32(dst, 0);
+    const int32_t n_iter = ggml_get_op_params_i32(dst, 1);
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t dr  = (n_tokens + nth - 1) / nth;
+    const int64_t it0 = dr * ith;
+    const int64_t it1 = MIN(it0 + dr, n_tokens);
+
+    for (int64_t it = it0; it < it1; ++it) {
+        float comb[hc*hc];
+
+        float max = -INFINITY;
+        for (int64_t idst = 0; idst < hc; ++idst) {
+            for (int64_t isrc = 0; isrc < hc; ++isrc) {
+                const float v = *(const float *) ((const char *) mixes->data + (comb_offset + isrc + hc*idst)*nbm0 + it*nbm1);
+                comb[idst + hc*isrc] = v;
+                max = MAX(max, v);
+            }
+        }
+
+        for (int64_t i = 0; i < hc*hc; ++i) {
+            comb[i] = expf(comb[i] - max);
+        }
+
+        for (int32_t i = 0; i < n_iter; ++i) {
+            for (int64_t idst = 0; idst < hc; ++idst) {
+                float sum = 0.0f;
+                for (int64_t isrc = 0; isrc < hc; ++isrc) {
+                    sum += comb[idst + hc*isrc];
+                }
+                sum = MAX(sum, eps);
+                for (int64_t isrc = 0; isrc < hc; ++isrc) {
+                    comb[idst + hc*isrc] /= sum;
+                }
+            }
+            for (int64_t isrc = 0; isrc < hc; ++isrc) {
+                float sum = 0.0f;
+                for (int64_t idst = 0; idst < hc; ++idst) {
+                    sum += comb[idst + hc*isrc];
+                }
+                sum = MAX(sum, eps);
+                for (int64_t idst = 0; idst < hc; ++idst) {
+                    comb[idst + hc*isrc] /= sum;
+                }
+            }
+        }
+
+        for (int64_t isrc = 0; isrc < hc; ++isrc) {
+            for (int64_t idst = 0; idst < hc; ++idst) {
+                *(float *) ((char *) dst->data + idst*nbd0 + isrc*nbd1 + it*nbd2) = comb[idst + hc*isrc];
+            }
+        }
+    }
+}
+
 void ggml_compute_forward_dsv4_hc_comb(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
@@ -11553,7 +11631,11 @@ void ggml_compute_forward_dsv4_hc_comb(
     switch (src0->type) {
         case GGML_TYPE_F32:
             {
-                ggml_compute_forward_dsv4_hc_comb_f32(params, dst);
+                if (ggml_get_op_params_i32(dst, 2) != 0) {
+                    ggml_compute_forward_dsv4_hc_comb_sinkhorn_f32(params, dst);
+                } else {
+                    ggml_compute_forward_dsv4_hc_comb_f32(params, dst);
+                }
             } break;
         default:
             {

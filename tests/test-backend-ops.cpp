@@ -4416,6 +4416,7 @@ struct test_dsv4_hc_comb : public test_dsv4_hc {
     const int64_t n_tokens;
     const int32_t n_iter;
     const float eps;
+    const bool sinkhorn;
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -4423,15 +4424,21 @@ struct test_dsv4_hc_comb : public test_dsv4_hc {
     }
 
     std::string vars() override {
-        return VARS_TO_STR3(n_tokens, n_iter, eps);
+        return VARS_TO_STR4(n_tokens, n_iter, eps, sinkhorn);
     }
 
-    test_dsv4_hc_comb(int64_t n_tokens = 17, int32_t n_iter = 4, float eps = 1e-6f)
-        : n_tokens(n_tokens), n_iter(n_iter), eps(eps) {}
+    test_dsv4_hc_comb(int64_t n_tokens = 17, int32_t n_iter = 4, float eps = 1e-6f, bool sinkhorn = false)
+        : n_tokens(n_tokens), n_iter(n_iter), eps(eps), sinkhorn(sinkhorn) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * mixes = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (2 + hc)*hc, n_tokens);
         ggml_set_name(mixes, "mixes");
+
+        if (sinkhorn) {
+            out = ggml_dsv4_hc_comb_sinkhorn(ctx, mixes, eps, n_iter);
+            ggml_set_name(out, "out");
+            return out;
+        }
 
         ggml_tensor * scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3);
         ggml_set_name(scale, "scale");
@@ -9762,6 +9769,10 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int64_t n_tokens : {1, 256, 336, 512, 513, 1024, 2048}) {
         test_cases.emplace_back(new test_dsv4_hc_comb(n_tokens, 20));
     }
+    for (int64_t n_tokens : {1, 17, 257, 4096}) {
+        test_cases.emplace_back(new test_dsv4_hc_comb(n_tokens, 10, 1e-9f, true));
+    }
+    test_cases.emplace_back(new test_dsv4_hc_comb(17, 1, 1e-9f, true));
 
     test_cases.emplace_back(new test_dsv4_hc_pre(1, 4, 1));
     test_cases.emplace_back(new test_dsv4_hc_pre(31, 4, 17));

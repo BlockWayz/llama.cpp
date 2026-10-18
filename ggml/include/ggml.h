@@ -2701,6 +2701,16 @@ extern "C" {
             float                 eps,
             int32_t               n_iter);
 
+    // hc_comb with plain Sinkhorn normalization (Agens Volundr): mixes [(2 + hc)*hc, n_tokens]
+    //          -> [dst_hc, src_hc, n_tokens]
+    // logits[dst, src, t] = mixes[2*hc + src + hc*dst, t]
+    // exp(logits - max), then n_iter times normalize over src followed by dst. Sums are clamped to >= eps.
+    GGML_API struct ggml_tensor * ggml_dsv4_hc_comb_sinkhorn(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * mixes,
+            float                 eps,
+            int32_t               n_iter);
+
     // hc_pre: x [n_embd, hc, n_tokens], weights [hc, n_tokens] -> [n_embd, n_tokens]
     //   result[i, t] = sum_h x[i, h, t]*weights[h, t]
     //

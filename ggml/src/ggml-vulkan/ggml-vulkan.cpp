@@ -15904,7 +15904,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
                     return false;
                 }
                 if (op->op == GGML_OP_DSV4_HC_COMB) {
-                    return device->pipeline_dsv4_hc_comb_f32 != nullptr;
+                    return device->pipeline_dsv4_hc_comb_f32 != nullptr && ggml_get_op_params_i32(op, 2) == 0;
                 }
                 return true;
             }
