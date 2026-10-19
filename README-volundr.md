@@ -148,7 +148,8 @@ control that zeroes the Engram previous ids.
   prompts get slower roughly quadratically (32K tokens: ~620 tok/s on one 48 GB GPU).
 * Recurrent state (KDA, Engram): no context shift and no arbitrary partial KV removal, as for llama.cpp's other
   hybrid models. Multi-turn prompt reuse works through context checkpoints (see "Multi-turn prompt cache" above).
-* `--split-mode layer` works across GPUs but gives no speed-up over one 48 GB GPU; `--split-mode row` does not load.
+* `--split-mode layer` works across GPUs but gives no speed-up over one 48 GB GPU. `--split-mode tensor` is not
+  supported for this architecture and is refused at load; `--split-mode row` no longer exists for CUDA upstream.
 
 ## Converting a checkpoint yourself
 
