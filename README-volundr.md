@@ -2,8 +2,8 @@
 
 This branch adds support for **Agens Volundr 32B** (Blockway) to llama.cpp: a new model architecture `volundr`,
 its GGUF conversion, and the two extra ggml ops it needs. The GGUF files are on Hugging Face:
-**[Blockway/Agens-Volundr-32B-Preview-GGUF](https://huggingface.co/Blockway/Agens-Volundr-32B-Preview-GGUF)**
-(model card and benchmarks: [Blockway/Agens-Volundr-32B-Preview](https://huggingface.co/Blockway/Agens-Volundr-32B-Preview)).
+**[Blockway/Agens-Volundr-32B-v1-GGUF](https://huggingface.co/Blockway/Agens-Volundr-32B-v1-GGUF)**
+(model card and benchmarks: [Blockway/Agens-Volundr-32B-v1](https://huggingface.co/Blockway/Agens-Volundr-32B-v1)).
 
 Stock llama.cpp refuses these files with `unknown model architecture: 'volundr'`; build this branch instead.
 
@@ -48,13 +48,13 @@ Add `llama-quantize llama-perplexity llama-bench` to `--target` if you need them
 
 ```bash
 # download one file (Q4_K_M, 26.6 GB)
-hf download Blockway/Agens-Volundr-32B-Preview-GGUF Agens-Volundr-32B-Preview-Q4_K_M.gguf --local-dir .   # pip install -U huggingface_hub
+hf download Blockway/Agens-Volundr-32B-v1-GGUF Agens-Volundr-32B-v1-Q4_K_M.gguf --local-dir .   # pip install -U huggingface_hub
 
 # OpenAI-compatible server: thinking, tool calls and reasoning_content parsing work out of the box
-./build/bin/llama-server -m Agens-Volundr-32B-Preview-Q4_K_M.gguf --jinja -c 32768 -ngl 99
+./build/bin/llama-server -m Agens-Volundr-32B-v1-Q4_K_M.gguf --jinja -c 32768 -ngl 99
 
 # interactive chat
-./build/bin/llama-cli -m Agens-Volundr-32B-Preview-Q4_K_M.gguf --jinja -c 32768 -ngl 99
+./build/bin/llama-cli -m Agens-Volundr-32B-v1-Q4_K_M.gguf --jinja -c 32768 -ngl 99
 ```
 
 Per request: `"chat_template_kwargs": {"enable_thinking": false}` turns thinking off;
@@ -157,17 +157,17 @@ The published files were made with these commands (build the `llama-quantize` ta
 
 ```bash
 pip install -r requirements.txt
-python convert_hf_to_gguf.py /path/to/Agens-Volundr-32B-Preview --outtype bf16 \
-  --model-name Agens-Volundr-32B-Preview --outfile Agens-Volundr-32B-Preview-BF16.gguf
+python convert_hf_to_gguf.py /path/to/Agens-Volundr-32B-v1 --outtype bf16 \
+  --model-name Agens-Volundr-32B-v1 --outfile Agens-Volundr-32B-v1-BF16.gguf
 
 ./build/bin/llama-quantize --tensor-type "engram_embd=bf16" \
-  Agens-Volundr-32B-Preview-BF16.gguf Agens-Volundr-32B-Preview-Q8_0.gguf Q8_0
+  Agens-Volundr-32B-v1-BF16.gguf Agens-Volundr-32B-v1-Q8_0.gguf Q8_0
 
 ./build/bin/llama-quantize --output-tensor-type q8_0 --token-embedding-type q8_0 --tensor-type "engram_embd=bf16" \
   --tensor-type "attn_qkv=q8_0" --tensor-type "attn_gate=q8_0" --tensor-type "ssm_out=q8_0" \
   --tensor-type "ssm_beta=q8_0" --tensor-type "ssm_f_a=q8_0" --tensor-type "ssm_f_b=q8_0" \
   --tensor-type "engram_value=q8_0" --tensor-type "engram_gate=q8_0" --tensor-type "hc_dyn=q8_0" \
-  Agens-Volundr-32B-Preview-BF16.gguf Agens-Volundr-32B-Preview-Q4_K_M.gguf Q4_K_M
+  Agens-Volundr-32B-v1-BF16.gguf Agens-Volundr-32B-v1-Q4_K_M.gguf Q4_K_M
 ```
 
 The Q4_K_M recipe keeps every KDA projection, the Engram value/gate projections, the mHC dynamic projections, the
