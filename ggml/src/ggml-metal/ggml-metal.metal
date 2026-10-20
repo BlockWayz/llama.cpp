@@ -11145,6 +11145,190 @@ kernel void kernel_opt_step_sgd_f32(
     x[gid] = x[gid] * (1.0f - pars[0] * pars[1]) - pars[0] * g[gid];
 }
 
+// Agens Volundr mHC: one thread per token
+kernel void kernel_sinkhorn_f32(
+        constant ggml_metal_kargs_sinkhorn & args,
+        device const char * src0,
+        device       char * dst,
+        uint tpig[[thread_position_in_grid]]) {
+    const int64_t t = tpig;
+    if (t >= args.nt) {
+        return;
+    }
+
+    const int n  = args.n;
+    const int nn = n*n;
+
+    float M[64];
+
+    device const char * lp = src0 + t*args.nb01;
+
+    float mx = -INFINITY;
+    for (int k = 0; k < nn; ++k) {
+        M[k] = *(device const float *) (lp + k*args.nb00);
+        mx = max(mx, M[k]);
+    }
+    for (int k = 0; k < nn; ++k) {
+        M[k] = exp(M[k] - mx);
+    }
+    for (int it = 0; it < args.n_iter; ++it) {
+        for (int i = 0; i < n; ++i) {
+            float sum = 0.0f;
+            for (int j = 0; j < n; ++j) sum += M[i*n + j];
+            sum = max(sum, args.eps);
+            for (int j = 0; j < n; ++j) M[i*n + j] /= sum;
+        }
+        for (int j = 0; j < n; ++j) {
+            float sum = 0.0f;
+            for (int i = 0; i < n; ++i) sum += M[i*n + j];
+            sum = max(sum, args.eps);
+            for (int i = 0; i < n; ++i) M[i*n + j] /= sum;
+        }
+    }
+
+    device char * dp = dst + t*args.nb2;
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            *(device float *) (dp + i*args.nb0 + j*args.nb1) = M[i*n + j];
+        }
+    }
+}
+
+// DeepSeek V4 hyper-connections, hc = 4: one thread per token
+kernel void kernel_dsv4_hc_comb_f32(
+        constant ggml_metal_kargs_dsv4_hc_comb & args,
+        device const char * mixes,
+        device const char * scale,
+        device const char * base,
+        device       char * dst,
+        uint tpig[[thread_position_in_grid]]) {
+    constexpr int HC = 4;
+    constexpr int comb_offset = 2*HC;
+
+    const int64_t it = tpig;
+    if (it >= args.n_tokens) {
+        return;
+    }
+
+    const float eps = args.eps;
+    const float scale_comb = *(device const float *) (scale + 2*args.nbs0);
+
+    float comb[HC*HC];
+
+    for (int isrc = 0; isrc < HC; ++isrc) {
+        float mx = -INFINITY;
+        for (int idst = 0; idst < HC; ++idst) {
+            const int idx = idst + HC*isrc;
+            const float xv = *(device const float *) (mixes + (comb_offset + idx)*args.nbm0 + it*args.nbm1);
+            const float bv = *(device const float *) (base  + (comb_offset + idx)*args.nbb0);
+            const float v = xv*scale_comb + bv;
+            comb[idx] = v;
+            mx = max(mx, v);
+        }
+
+        float sum = 0.0f;
+        for (int idst = 0; idst < HC; ++idst) {
+            const int idx = idst + HC*isrc;
+            const float v = exp(comb[idx] - mx);
+            comb[idx] = v;
+            sum += v;
+        }
+
+        const float inv_sum = 1.0f/sum;
+        for (int idst = 0; idst < HC; ++idst) {
+            const int idx = idst + HC*isrc;
+            comb[idx] = comb[idx]*inv_sum + eps;
+        }
+    }
+
+    for (int32_t iter = 0; iter < args.n_iter; ++iter) {
+        if (iter > 0) {
+            // normalise over dst
+            for (int isrc = 0; isrc < HC; ++isrc) {
+                float sum = eps;
+                for (int idst = 0; idst < HC; ++idst) sum += comb[idst + HC*isrc];
+                const float inv_sum = 1.0f/sum;
+                for (int idst = 0; idst < HC; ++idst) comb[idst + HC*isrc] *= inv_sum;
+            }
+        }
+        // normalise over src
+        for (int idst = 0; idst < HC; ++idst) {
+            float sum = eps;
+            for (int isrc = 0; isrc < HC; ++isrc) sum += comb[idst + HC*isrc];
+            const float inv_sum = 1.0f/sum;
+            for (int isrc = 0; isrc < HC; ++isrc) comb[idst + HC*isrc] *= inv_sum;
+        }
+    }
+
+    for (int isrc = 0; isrc < HC; ++isrc) {
+        for (int idst = 0; idst < HC; ++idst) {
+            *(device float *) (dst + idst*args.nb0 + isrc*args.nb1 + it*args.nb2) = comb[idst + HC*isrc];
+        }
+    }
+}
+
+// result[i, t] = sum_h x[i, h, t]*weights[h, t]
+// grid: (ceil(n_embd/ntg), n_tokens)
+kernel void kernel_dsv4_hc_pre_f32(
+        constant ggml_metal_kargs_dsv4_hc_pre & args,
+        device const char * x,
+        device const char * weights,
+        device       char * dst,
+        uint2 tgpig[[threadgroup_position_in_grid]],
+        uint2 tpitg[[thread_position_in_threadgroup]],
+        uint2   ntg[[threads_per_threadgroup]]) {
+    const int64_t i0 = (int64_t) tgpig.x*ntg.x + tpitg.x;
+    const int64_t it = tgpig.y;
+
+    if (i0 >= args.n_embd) {
+        return;
+    }
+
+    device const char * xp = x       + i0*args.nbx0 + it*args.nbx2;
+    device const char * wp = weights +                it*args.nbw1;
+
+    float sum = 0.0f;
+    for (int64_t ih = 0; ih < args.hc; ++ih) {
+        sum += *(device const float *) (xp + ih*args.nbx1) * *(device const float *) (wp + ih*args.nbw0);
+    }
+
+    *(device float *) (dst + i0*args.nb0 + it*args.nb1) = sum;
+}
+
+// result[i, dst, t] = x[i, t]*post[dst, t] + sum_src residual[i, src, t]*comb[dst, src, t]
+// grid: (ceil(n_embd/ntg), hc, n_tokens)
+kernel void kernel_dsv4_hc_post_f32(
+        constant ggml_metal_kargs_dsv4_hc_post & args,
+        device const char * x,
+        device const char * residual,
+        device const char * post,
+        device const char * comb,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        uint3 tpitg[[thread_position_in_threadgroup]],
+        uint3   ntg[[threads_per_threadgroup]]) {
+    const int64_t i0   = (int64_t) tgpig.x*ntg.x + tpitg.x;
+    const int64_t idst = tgpig.y;
+    const int64_t it   = tgpig.z;
+
+    if (i0 >= args.n_embd) {
+        return;
+    }
+
+    const float xv = *(device const float *) (x    + i0*args.nbx0   + it*args.nbx1);
+    const float pv = *(device const float *) (post + idst*args.nbp0 + it*args.nbp1);
+
+    device const char * rp = residual + i0*args.nbr0   + it*args.nbr2;
+    device const char * cp = comb     + idst*args.nbc0 + it*args.nbc2;
+
+    float sum = xv*pv;
+    for (int64_t isrc = 0; isrc < args.hc; ++isrc) {
+        sum += *(device const float *) (rp + isrc*args.nbr1) * *(device const float *) (cp + isrc*args.nbc1);
+    }
+
+    *(device float *) (dst + i0*args.nb0 + idst*args.nb1 + it*args.nb2) = sum;
+}
+
 template<typename T>
 kernel void kernel_memset(
         constant ggml_metal_kargs_memset & args,

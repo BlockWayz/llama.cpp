@@ -3798,6 +3798,9 @@ struct test_dsv4_hc : public test_case {
 
     void initialize_tensors(ggml_context * ctx) override {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->view_src != nullptr) {
+                continue;
+            }
             const std::string name = ggml_get_name(t);
             float lo;
             float hi;
@@ -3828,21 +3831,44 @@ struct test_dsv4_hc_comb : public test_dsv4_hc {
         return "DSV4_HC_COMB";
     }
 
+    const int strided; // 0: contiguous, 1: mixes rows padded + strided base/scale, 2: mixes transposed
+
     std::string vars() override {
-        return VARS_TO_STR3(n_tokens, n_iter, eps);
+        return VARS_TO_STR4(n_tokens, n_iter, eps, strided);
     }
 
-    test_dsv4_hc_comb(int64_t n_tokens = 17, int32_t n_iter = 4, float eps = 1e-6f)
-        : n_tokens(n_tokens), n_iter(n_iter), eps(eps) {}
+    test_dsv4_hc_comb(int64_t n_tokens = 17, int32_t n_iter = 4, float eps = 1e-6f, int strided = 0)
+        : n_tokens(n_tokens), n_iter(n_iter), eps(eps), strided(strided) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * mixes = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (2 + hc)*hc, n_tokens);
+        const int64_t nm = (2 + hc)*hc;
+
+        ggml_tensor * mixes;
+        ggml_tensor * scale;
+        ggml_tensor * base;
+        if (strided == 0) {
+            mixes = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nm, n_tokens);
+            scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3);
+            base  = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, nm);
+        } else {
+            if (strided == 1) {
+                ggml_tensor * m = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nm + 7, n_tokens);
+                ggml_set_name(m, "mixes");
+                mixes = ggml_view_2d(ctx, m, nm, n_tokens, m->nb[1], 3*m->nb[0]);
+            } else {
+                ggml_tensor * m = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens, nm);
+                ggml_set_name(m, "mixes");
+                mixes = ggml_transpose(ctx, m);
+            }
+            ggml_tensor * s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 8);
+            ggml_set_name(s, "scale");
+            scale = ggml_view_1d(ctx, s, 3, 2*s->nb[0]);
+            ggml_tensor * b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2, nm);
+            ggml_set_name(b, "base");
+            base = ggml_transpose(ctx, ggml_view_2d(ctx, b, 1, nm, b->nb[1], b->nb[0])); // nb0 = 2 floats
+        }
         ggml_set_name(mixes, "mixes");
-
-        ggml_tensor * scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3);
         ggml_set_name(scale, "scale");
-
-        ggml_tensor * base = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (2 + hc)*hc);
         ggml_set_name(base, "base");
 
         out = ggml_dsv4_hc_comb(ctx, mixes, scale, base, eps, n_iter);
@@ -3860,18 +3886,37 @@ struct test_dsv4_hc_pre : public test_dsv4_hc {
         return "DSV4_HC_PRE";
     }
 
+    const int64_t nh;
+    const int strided; // 0: contiguous, 1: weights a row view of the mHC mix (volundr), 2: x permuted + weights transposed
+
     std::string vars() override {
-        return VARS_TO_STR2(n_embd, n_tokens);
+        return VARS_TO_STR4(n_embd, n_tokens, nh, strided);
     }
 
-    test_dsv4_hc_pre(int64_t n_embd = 31, int64_t n_tokens = 17)
-        : n_embd(n_embd), n_tokens(n_tokens) {}
+    test_dsv4_hc_pre(int64_t n_embd = 31, int64_t n_tokens = 17, int64_t nh = hc, int strided = 0)
+        : n_embd(n_embd), n_tokens(n_tokens), nh(nh), strided(strided) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, hc, n_tokens);
+        ggml_tensor * x;
+        ggml_tensor * weights;
+        if (strided == 2) {
+            ggml_tensor * xp = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_tokens, nh);
+            ggml_set_name(xp, "x");
+            x = ggml_permute(ctx, xp, 0, 2, 1, 3);
+            ggml_tensor * wt = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens, nh);
+            ggml_set_name(wt, "weights");
+            weights = ggml_transpose(ctx, wt);
+        } else {
+            x = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, nh, n_tokens);
+            if (strided == 1) {
+                ggml_tensor * d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2*nh + nh*nh, n_tokens);
+                ggml_set_name(d, "weights");
+                weights = ggml_view_2d(ctx, d, nh, n_tokens, d->nb[1], 0);
+            } else {
+                weights = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nh, n_tokens);
+            }
+        }
         ggml_set_name(x, "x");
-
-        ggml_tensor * weights = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc, n_tokens);
         ggml_set_name(weights, "weights");
 
         out = ggml_dsv4_hc_pre(ctx, x, weights);
@@ -3915,25 +3960,36 @@ struct test_ngram_hash : public test_case {
 struct test_sinkhorn : public test_case {
     const int n;
     const int64_t n_tokens;
-    const bool strided;
+    const int strided; // 0: contiguous, 1: logits a row view of the mHC mix (volundr), 2: logits transposed
+    const int n_iter;
 
     std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "SINKHORN"; }
-    std::string vars() override { return VARS_TO_STR3(n, n_tokens, strided); }
+    std::string vars() override { return VARS_TO_STR4(n, n_tokens, strided, n_iter); }
 
-    test_sinkhorn(int n = 4, int64_t n_tokens = 33, bool strided = false) : n(n), n_tokens(n_tokens), strided(strided) {}
+    test_sinkhorn(int n = 4, int64_t n_tokens = 33, int strided = 0, int n_iter = 10)
+        : n(n), n_tokens(n_tokens), strided(strided), n_iter(n_iter) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, strided ? 2*n + n*n : n*n, n_tokens);
-        ggml_set_name(a, "logits");
-        ggml_tensor * l = strided ? ggml_view_2d(ctx, a, n*n, n_tokens, a->nb[1], 2*n*ggml_element_size(a)) : a;
-        ggml_tensor * out = ggml_sinkhorn(ctx, l, n, 10, 1e-9f);
+        ggml_tensor * l;
+        if (strided == 2) {
+            ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens, n*n);
+            ggml_set_name(a, "logits");
+            l = ggml_transpose(ctx, a);
+        } else {
+            ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, strided ? 2*n + n*n : n*n, n_tokens);
+            ggml_set_name(a, "logits");
+            l = strided ? ggml_view_2d(ctx, a, n*n, n_tokens, a->nb[1], 2*n*ggml_element_size(a)) : a;
+        }
+        ggml_tensor * out = ggml_sinkhorn(ctx, l, n, n_iter, 1e-9f);
         ggml_set_name(out, "out");
         return out;
     }
 
     void initialize_tensors(ggml_context * ctx) override {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
-            init_tensor_uniform(t, -3.0f, 16.0f);
+            if (t->view_src == nullptr) {
+                init_tensor_uniform(t, -3.0f, 16.0f);
+            }
         }
     }
 };
@@ -3947,24 +4003,52 @@ struct test_dsv4_hc_post : public test_dsv4_hc {
         return "DSV4_HC_POST";
     }
 
+    const int64_t nh;
+    const int strided; // 0: contiguous, 1: x padded rows + post a row view of the mHC mix (volundr), 2: all inputs permuted
+
     std::string vars() override {
-        return VARS_TO_STR2(n_embd, n_tokens);
+        return VARS_TO_STR4(n_embd, n_tokens, nh, strided);
     }
 
-    test_dsv4_hc_post(int64_t n_embd = 31, int64_t n_tokens = 17)
-        : n_embd(n_embd), n_tokens(n_tokens) {}
+    test_dsv4_hc_post(int64_t n_embd = 31, int64_t n_tokens = 17, int64_t nh = hc, int strided = 0)
+        : n_embd(n_embd), n_tokens(n_tokens), nh(nh), strided(strided) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
+        ggml_tensor * x;
+        ggml_tensor * residual;
+        ggml_tensor * post;
+        ggml_tensor * comb;
+        if (strided == 2) {
+            ggml_tensor * xt = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens, n_embd);
+            ggml_set_name(xt, "x");
+            x = ggml_transpose(ctx, xt);
+            ggml_tensor * rp = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, n_tokens, nh);
+            ggml_set_name(rp, "residual");
+            residual = ggml_permute(ctx, rp, 0, 2, 1, 3);
+            ggml_tensor * pt = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_tokens, nh);
+            ggml_set_name(pt, "post");
+            post = ggml_transpose(ctx, pt);
+            ggml_tensor * ct = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, nh, nh, n_tokens);
+            ggml_set_name(ct, "comb");
+            comb = ggml_transpose(ctx, ct);
+        } else {
+            residual = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, nh, n_tokens);
+            comb     = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, nh, nh, n_tokens);
+            if (strided == 1) {
+                ggml_tensor * xp = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd + 5, n_tokens);
+                ggml_set_name(xp, "x");
+                x = ggml_view_2d(ctx, xp, n_embd, n_tokens, xp->nb[1], 0);
+                ggml_tensor * d = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2*nh + nh*nh, n_tokens);
+                ggml_set_name(d, "post");
+                post = ggml_view_2d(ctx, d, nh, n_tokens, d->nb[1], nh*d->nb[0]);
+            } else {
+                x    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
+                post = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nh, n_tokens);
+            }
+        }
         ggml_set_name(x, "x");
-
-        ggml_tensor * residual = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, hc, n_tokens);
         ggml_set_name(residual, "residual");
-
-        ggml_tensor * post = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc, n_tokens);
         ggml_set_name(post, "post");
-
-        ggml_tensor * comb = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, hc, hc, n_tokens);
         ggml_set_name(comb, "comb");
 
         out = ggml_dsv4_hc_post(ctx, x, residual, post, comb);
@@ -8109,9 +8193,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_snake_fuse(type, {  64,  32, 2, 3}));   // ne[2] > 1 and ne[3] > 1
     }
 
-    test_cases.emplace_back(new test_dsv4_hc_comb(1, 1));
-    test_cases.emplace_back(new test_dsv4_hc_comb(17, 4));
-    test_cases.emplace_back(new test_dsv4_hc_comb(257, 8));
+    for (int strided : {0, 1, 2}) {
+        test_cases.emplace_back(new test_dsv4_hc_comb(1, 1, 1e-6f, strided));
+        test_cases.emplace_back(new test_dsv4_hc_comb(17, 4, 1e-6f, strided));
+        test_cases.emplace_back(new test_dsv4_hc_comb(257, 8, 1e-6f, strided));
+        test_cases.emplace_back(new test_dsv4_hc_comb(77, 20, 1e-6f, strided));
+    }
 
     for (int order : {1, 2, 3}) {
         for (int64_t n : {1, 17, 512}) {
@@ -8119,20 +8206,35 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_ngram_hash(order, n, 3));
         }
     }
-    for (bool strided : {false, true}) {
+    for (int strided : {0, 1, 2}) {
         test_cases.emplace_back(new test_sinkhorn(4, 1, strided));
         test_cases.emplace_back(new test_sinkhorn(4, 33, strided));
         test_cases.emplace_back(new test_sinkhorn(4, 4096, strided));
         test_cases.emplace_back(new test_sinkhorn(3, 7, strided));
+        test_cases.emplace_back(new test_sinkhorn(1, 5, strided));
+        test_cases.emplace_back(new test_sinkhorn(5, 67, strided));
+        test_cases.emplace_back(new test_sinkhorn(8, 129, strided));
+        test_cases.emplace_back(new test_sinkhorn(4, 33, strided, 0));
+        test_cases.emplace_back(new test_sinkhorn(4, 33, strided, 1));
     }
-    test_cases.emplace_back(new test_dsv4_hc_pre(1, 1));
-    test_cases.emplace_back(new test_dsv4_hc_pre(31, 17));
-    test_cases.emplace_back(new test_dsv4_hc_pre(128, 257));
-    test_cases.emplace_back(new test_dsv4_hc_pre(4096, 21));
+    for (int strided : {0, 1, 2}) {
+        test_cases.emplace_back(new test_dsv4_hc_pre(1, 1, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_pre(31, 17, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_pre(128, 257, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_pre(4096, 21, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_pre(5120, 7, 4, strided)); // volundr n_embd
+        test_cases.emplace_back(new test_dsv4_hc_pre(33, 9, 1, strided));
+        test_cases.emplace_back(new test_dsv4_hc_pre(257, 13, 7, strided)); // kimi-k3 style n_ckpt
+    }
 
-    test_cases.emplace_back(new test_dsv4_hc_post(1, 1));
-    test_cases.emplace_back(new test_dsv4_hc_post(31, 17));
-    test_cases.emplace_back(new test_dsv4_hc_post(128, 257));
+    for (int strided : {0, 1, 2}) {
+        test_cases.emplace_back(new test_dsv4_hc_post(1, 1, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_post(31, 17, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_post(128, 257, 4, strided));
+        test_cases.emplace_back(new test_dsv4_hc_post(5120, 7, 4, strided)); // volundr n_embd
+        test_cases.emplace_back(new test_dsv4_hc_post(33, 9, 1, strided));
+        test_cases.emplace_back(new test_dsv4_hc_post(257, 13, 3, strided));
+    }
 
     // glu ops
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {

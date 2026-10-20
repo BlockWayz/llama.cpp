@@ -1369,6 +1369,24 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_OPT_STEP_ADAMW:
         case GGML_OP_OPT_STEP_SGD:
             return has_simdgroup_reduction;
+        case GGML_OP_SINKHORN:
+            // any src/dst strides; n is capped by the per-thread 8x8 matrix
+            return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                op->op_params[0] >= 1 && op->op_params[0] <= 8;
+        case GGML_OP_DSV4_HC_COMB:
+            // any strides; the kernel is specialised for hc = 4 (the only value ggml_dsv4_hc_comb accepts)
+            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[2]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                op->src[0]->ne[0] == (2 + 4)*4 && op->ne[0] == 4 && op->ne[1] == 4;
+        case GGML_OP_DSV4_HC_PRE:
+            // any strides, any hc
+            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32;
+        case GGML_OP_DSV4_HC_POST:
+            // any strides, any hc
+            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                op->src[2]->type == GGML_TYPE_F32 && op->src[3]->type == GGML_TYPE_F32 &&
+                op->type == GGML_TYPE_F32;
         default:
             return false;
     }
