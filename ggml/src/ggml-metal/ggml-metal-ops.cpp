@@ -481,6 +481,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_count_equal(ctx, idx);
             } break;
+        case GGML_OP_NGRAM_HASH:
+            {
+                n_fuse = ggml_metal_op_ngram_hash(ctx, idx);
+            } break;
         case GGML_OP_SINKHORN:
             {
                 n_fuse = ggml_metal_op_sinkhorn(ctx, idx);
@@ -4874,6 +4878,48 @@ int ggml_metal_op_count_equal(ggml_metal_op_t ctx, int idx) {
         ggml_metal_encoder_set_threadgroup_memory_size(enc, smem, 0);
         ggml_metal_encoder_dispatch_threadgroups(enc, ne01, ne02, ne03, nth, 1, 1);
     }
+
+    return 1;
+}
+
+int ggml_metal_op_ngram_hash(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    const int64_t n  = op->ne[0];
+    const int64_t ns = op->ne[1];
+
+    ggml_metal_kargs_ngram_hash args = {
+        /*.order    =*/ ggml_get_op_params_i32(op, 0),
+        /*.prefix   =*/ ggml_get_op_params_i32(op, 1),
+        /*.rows     =*/ ggml_get_op_params_i32(op, 2),
+        /*.n_primes =*/ ggml_get_op_params_i32(op, 3),
+        /*.primes   =*/ { 0 },
+        /*.n        =*/ n,
+        /*.ns       =*/ ns,
+        /*.nb00     =*/ op->src[0]->nb[0],
+        /*.nb01     =*/ op->src[0]->nb[1],
+        /*.nb0      =*/ op->nb[0],
+        /*.nb1      =*/ op->nb[1],
+    };
+
+    GGML_ASSERT(args.n_primes >= 1 && args.n_primes <= 8);
+    for (int i = 0; i < 8; ++i) {
+        args.primes[i] = i < args.n_primes ? (uint64_t) (uint32_t) ggml_get_op_params_i32(op, 4 + i) : 1;
+    }
+
+    auto pipeline = ggml_metal_library_get_pipeline_ngram_hash(lib, op);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
+
+    const int nth = (int) std::min<int64_t>(std::min(ggml_metal_pipeline_max_theads_per_threadgroup(pipeline), 256), n);
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, (n + nth - 1)/nth, ns, 1, nth, 1, 1);
 
     return 1;
 }

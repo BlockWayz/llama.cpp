@@ -1219,6 +1219,20 @@ typedef struct {
 } ggml_metal_kargs_opt_step_sgd;
 
 typedef struct {
+    int32_t  order;
+    int32_t  prefix;
+    int32_t  rows;
+    int32_t  n_primes;
+    uint64_t primes[8];
+    int64_t  n;
+    int64_t  ns;
+    uint64_t nb00;
+    uint64_t nb01;
+    uint64_t nb0;
+    uint64_t nb1;
+} ggml_metal_kargs_ngram_hash;
+
+typedef struct {
     int32_t  n;
     int32_t  n_iter;
     float    eps;

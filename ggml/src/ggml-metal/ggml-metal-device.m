@@ -1369,6 +1369,10 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_OPT_STEP_ADAMW:
         case GGML_OP_OPT_STEP_SGD:
             return has_simdgroup_reduction;
+        case GGML_OP_NGRAM_HASH:
+            // any src strides
+            return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_I32 &&
+                op->op_params[3] >= 1 && op->op_params[3] <= 8;
         case GGML_OP_SINKHORN:
             // any src/dst strides; n is capped by the per-thread 8x8 matrix
             return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&

@@ -3930,29 +3930,61 @@ struct test_ngram_hash : public test_case {
     const int order;
     const int64_t n;
     const int64_t n_seqs;
+    const int strided; // 0: contiguous, 1: padded rows (view), 2: transposed
+    const int rows;
+    const int n_primes;
+    const bool big_primes; // primes near 2^31 and a negative int32 (cast to uint32), stresses the uint64 wrap
 
     std::string op_desc(ggml_tensor * t) override { GGML_UNUSED(t); return "NGRAM_HASH"; }
-    std::string vars() override { return VARS_TO_STR3(order, n, n_seqs); }
+    std::string vars() override { return VARS_TO_STR7(order, n, n_seqs, strided, rows, n_primes, big_primes); }
 
-    test_ngram_hash(int order = 3, int64_t n = 17, int64_t n_seqs = 2) : order(order), n(n), n_seqs(n_seqs) {}
+    test_ngram_hash(int order = 3, int64_t n = 17, int64_t n_seqs = 2, int strided = 0, int rows = 1 << 20, int n_primes = 5, bool big_primes = false)
+        : order(order), n(n), n_seqs(n_seqs), strided(strided), rows(rows), n_primes(n_primes), big_primes(big_primes) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 2 + n, n_seqs);
-        ggml_set_name(a, "ids");
-        const int32_t primes[5] = { 1000003, 1000033, 1000037, 1000039, 1000081 };
-        ggml_tensor * out = ggml_ngram_hash(ctx, a, order, 2, 1 << 20, primes, 5);
+        const int prefix = std::max(order - 1, 2);
+        ggml_tensor * a;
+        if (strided == 2) {
+            ggml_tensor * at = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_seqs, prefix + n);
+            ggml_set_name(at, "ids");
+            a = ggml_transpose(ctx, at);
+        } else if (strided == 1) {
+            ggml_tensor * ap = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, prefix + n + 3, n_seqs);
+            ggml_set_name(ap, "ids");
+            a = ggml_view_2d(ctx, ap, prefix + n, n_seqs, ap->nb[1], 2*ap->nb[0]);
+        } else {
+            a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, prefix + n, n_seqs);
+            ggml_set_name(a, "ids");
+        }
+        const int32_t primes_small[8] = { 1000003, 1000033, 1000037, 1000039, 1000081, 1000099, 1000117, 1000121 };
+        const int32_t primes_big[8]   = { 2147483647, 2147483629, -5, 2147483587, 1000003, 2147483579, 2147483563, 2147483549 };
+        ggml_tensor * out = ggml_ngram_hash(ctx, a, order, prefix, rows, big_primes ? primes_big : primes_small, n_primes);
         ggml_set_name(out, "out");
         return out;
     }
 
     void initialize_tensors(ggml_context * ctx) override {
         std::mt19937 rng(1234);
-        std::uniform_int_distribution<int> dist(0, 248320);
+        // (id + 1) values; 0 = before the sequence start; ids up to 2^24 are exact in F32
+        std::uniform_int_distribution<int> dist(0, 1 << 24);
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->view_src != nullptr) {
+                continue;
+            }
             std::vector<float> v(ggml_nelements(t));
-            for (auto & x : v) x = (float) dist(rng);
+            for (auto & x : v) x = (rng() % 8 == 0) ? 0.0f : (float) dist(rng);
             ggml_backend_tensor_set(t, v.data(), 0, ggml_nbytes(t));
         }
+    }
+
+    // row indices must match exactly: count the mismatches
+    double max_nmse_err() override { return 0.0; }
+    double err(const float * a, const float * b, size_t n) override {
+        double bad = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            bad += a[i] != b[i];
+        }
+        return bad;
     }
 };
 
@@ -8205,6 +8237,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_ngram_hash(order, n, 1));
             test_cases.emplace_back(new test_ngram_hash(order, n, 3));
         }
+    }
+    for (int strided : {0, 1, 2}) {
+        test_cases.emplace_back(new test_ngram_hash(2, 4096, 1, strided, 1 << 20, 5));       // volundr orders 2, 3, 2^20 rows
+        test_cases.emplace_back(new test_ngram_hash(3, 4096, 1, strided, 1 << 20, 5));
+        test_cases.emplace_back(new test_ngram_hash(3, 33, 5, strided, 1 << 20, 5));
+        test_cases.emplace_back(new test_ngram_hash(4, 257, 2, strided, 1000003, 1));
+        test_cases.emplace_back(new test_ngram_hash(5, 129, 3, strided, 4093, 8));
+        test_cases.emplace_back(new test_ngram_hash(3, 257, 2, strided, 16777213, 8, true));
+        test_cases.emplace_back(new test_ngram_hash(8, 63, 2, strided, 1 << 20, 3, true));
     }
     for (int strided : {0, 1, 2}) {
         test_cases.emplace_back(new test_sinkhorn(4, 1, strided));

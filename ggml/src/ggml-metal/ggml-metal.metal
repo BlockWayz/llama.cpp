@@ -11145,6 +11145,36 @@ kernel void kernel_opt_step_sgd_f32(
     x[gid] = x[gid] * (1.0f - pars[0] * pars[1]) - pars[0] * g[gid];
 }
 
+// Agens Volundr Engram: 61-bit polynomial hash of the trailing `order` (id + 1) values, wrapping uint64 arithmetic
+// grid: (ceil(n/ntg), n_seqs)
+kernel void kernel_ngram_hash_f32(
+        constant ggml_metal_kargs_ngram_hash & args,
+        device const char * src0,
+        device       char * dst,
+        uint2 tgpig[[threadgroup_position_in_grid]],
+        uint2 tpitg[[thread_position_in_threadgroup]],
+        uint2   ntg[[threads_per_threadgroup]]) {
+    const int64_t t = (int64_t) tgpig.x*ntg.x + tpitg.x;
+    const int64_t s = tgpig.y;
+
+    if (t >= args.n) {
+        return;
+    }
+
+    device const char * e = src0 + s*args.nb01;
+
+    const ulong mask61 = 0x1FFFFFFFFFFFFFFFul;
+
+    ulong code = 0;
+    for (int32_t j = 0; j < args.order; ++j) {
+        const int64_t idx = (int64_t) args.prefix + t - (args.order - 1) + j;
+        const ulong   ev  = (ulong) (long) *(device const float *) (e + idx*args.nb00);
+        code = (code*args.primes[j % args.n_primes] + ev) & mask61;
+    }
+
+    *(device int32_t *) (dst + t*args.nb0 + s*args.nb1) = (int32_t) (code % (ulong) args.rows);
+}
+
 // Agens Volundr mHC: one thread per token
 kernel void kernel_sinkhorn_f32(
         constant ggml_metal_kargs_sinkhorn & args,
